@@ -1,8 +1,8 @@
 class Kwwk < Formula
   desc "Swift-native coding-agent CLI (Anthropic, Codex, Gemini, Copilot)"
   homepage "https://github.com/EYHN/kwwk"
-  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "d48ee6a3caa184f176c1a55fefb1f7da1a59d1172fa58cf42767fae02530cc3a"
+  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "0cdd915a1ead2954f83214f03e988f12291a44476a0883df576d198f9e11f845"
   license "MIT"
   head "https://github.com/EYHN/kwwk.git", branch: "main"
 
@@ -15,7 +15,11 @@ class Kwwk < Formula
            "--disable-sandbox",
            "--configuration", "release",
            "--product", "kwwk"
-    bin.install ".build/release/kwwk"
+    # The binary and its SwiftPM resource bundle must live side-by-side —
+    # `Bundle.module` looks for `kwwk_KWWKAI.bundle` next to the executable.
+    libexec.install ".build/release/kwwk"
+    libexec.install ".build/release/kwwk_KWWKAI.bundle"
+    bin.install_symlink libexec/"kwwk"
   end
 
   test do
