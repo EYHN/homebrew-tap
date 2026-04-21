@@ -16,10 +16,18 @@ class Kwwk < Formula
            "--configuration", "release",
            "--product", "kwwk"
     # The binary and its SwiftPM resource bundle must live side-by-side —
-    # `Bundle.module` looks for `kwwk_KWWKAI.bundle` next to the executable.
+    # `Bundle.module` resolves `kwwk_KWWKAI.bundle` via `_NSGetExecutablePath`,
+    # which returns the path passed to exec without following symlinks.
+    # A symlink in `bin/` would therefore make `Bundle.module` look inside
+    # `/opt/homebrew/bin/`. Use a shell shim that `exec`s the libexec path
+    # directly so the child process sees libexec as its bundle directory.
     libexec.install ".build/release/kwwk"
     libexec.install ".build/release/kwwk_KWWKAI.bundle"
-    bin.install_symlink libexec/"kwwk"
+    (bin/"kwwk").write <<~SH
+      #!/bin/bash
+      exec "#{libexec}/kwwk" "$@"
+    SH
+    (bin/"kwwk").chmod 0755
   end
 
   test do
