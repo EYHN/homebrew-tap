@@ -1,0 +1,82 @@
+name: brew pr-pull
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number
+        required: true
+      head_sha:
+        description: Exact pull request head commit SHA
+        required: true
+
+jobs:
+  pr-pull:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      issues: read
+      pull-requests: write
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up git
+        uses: Homebrew/actions/git-user-config@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
+
+      - name: Verify pull request version and head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+        run: |
+          actual_head="$(gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          base_ref="$(gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
+          test "$base_ref" = main || { echo "refusing non-main pull request" >&2; exit 1; }
+          test "$actual_head" = "$HEAD_SHA" || { echo "pull request head changed" >&2; exit 1; }
+
+          main_formula="$RUNNER_TEMP/kwwk-main.rb"
+          head_formula="$RUNNER_TEMP/kwwk-head.rb"
+          gh api "repos/$GITHUB_REPOSITORY/contents/Formula/kwwk.rb?ref=main" --jq .content \
+            | base64 --decode > "$main_formula"
+          gh api "repos/$GITHUB_REPOSITORY/contents/Formula/kwwk.rb?ref=$HEAD_SHA" --jq .content \
+            | base64 --decode > "$head_formula"
+
+          ruby - "$main_formula" "$head_formula" <<'RUBY'
+          require "rubygems"
+
+          def formula_version(path)
+            formula = File.read(path)
+            urls = formula.scan(/^  url "([^"]+)"$/).flatten
+            abort "expected exactly one top-level source url in #{path}" unless urls.one?
+            tag = urls.first.match(%r{/archive/refs/tags/([^/]+)\.tar\.gz$})&.[](1)
+            abort "cannot determine formula tag in #{path}" unless tag
+            [tag, Gem::Version.new(tag.delete_prefix("v"))]
+          rescue ArgumentError => error
+            abort "cannot parse formula version in #{path}: #{error.message}"
+          end
+
+          current_tag, current_version = formula_version(ARGV.fetch(0))
+          target_tag, target_version = formula_version(ARGV.fetch(1))
+          if target_version < current_version
+            abort "refusing to downgrade kwwk from #{current_tag} to #{target_tag}"
+          end
+          puts "version guard: #{current_tag} -> #{target_tag}"
+          RUBY
+
+      - name: Pull bottles
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+        run: |
+          brew pr-pull --debug --tap="$GITHUB_REPOSITORY" --head-sha="$HEAD_SHA" "$PULL_REQUEST"
+
+      - name: Push commits
+        uses: Homebrew/actions/git-try-push@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
+        with:
+          branch: main

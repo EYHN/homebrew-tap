@@ -6,11 +6,16 @@ class Kwwk < Formula
   license "MIT"
   head "https://github.com/EYHN/kwwk.git", branch: "main"
 
-  depends_on :macos
-  depends_on macos: :sonoma
   depends_on xcode: ["16.0", :build]
+  depends_on macos: :sonoma
 
   def install
+    swift_output = Utils.safe_popen_read("swift", "--version")
+    swift_version = swift_output[/Swift version (\d+(?:\.\d+)+)/, 1]
+    if swift_version.nil? || Version.new(swift_version) < Version.new("6.1")
+      odie "kwwk requires Swift 6.1 or newer to build from source"
+    end
+
     system "swift", "build",
            "--disable-sandbox",
            "--configuration", "release",
@@ -31,6 +36,14 @@ class Kwwk < Formula
   end
 
   test do
-    assert_match "kwwk", shell_output("#{bin}/kwwk --help")
+    help = shell_output("#{bin}/kwwk --help")
+    assert_match "kwwk", help
+    assert_path_exists libexec/"kwwk_KWWKAI.bundle/models.json"
+    assert_path_exists libexec/"kwwk_KWWKAI.bundle/cursor-models.json"
+    # v0.1.27 predates the offline resource self-test. Every later release
+    # must keep the command working; do not silently infer support from --help.
+    if build.head? || version > Version.new("0.1.27")
+      assert_equal "resources: ok", shell_output("#{bin}/kwwk --self-test").strip
+    end
   end
 end
