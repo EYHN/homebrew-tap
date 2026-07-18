@@ -28,7 +28,11 @@ macOS 15.2+ that toolchain is included with Xcode 16.3+.
 ## Publishing a kwwk release
 
 Pushing a version tag in `EYHN/kwwk` creates the source release and opens a
-formula bump pull request here. Wait for both `brew test-bot` builders to pass,
-then run the `brew pr-pull` workflow with the pull request number and its exact
-head SHA. That workflow publishes the bottle artifacts and pushes the formula
-plus bottle checksums to `main`.
+formula bump pull request here. After both `brew test-bot` builders pass, the
+trusted release PR is validated and `brew pr-pull` runs automatically. It
+publishes the bottle artifacts and pushes the formula plus bottle checksums to
+`main`.
+
+The `brew pr-pull` workflow remains manually dispatchable for recovery. Use the
+pull request number and its exact tested head SHA; the same source, run, and
+artifact guards apply.

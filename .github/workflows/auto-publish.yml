@@ -1,0 +1,189 @@
+name: auto-publish bottles
+
+on:
+  workflow_run:
+    workflows:
+      - brew test-bot
+    types:
+      - completed
+    branches:
+      - "automation/kwwk-v*"
+
+permissions: {}
+
+jobs:
+  validate:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      head_sha: ${{ steps.target.outputs.head_sha }}
+      pull_request: ${{ steps.target.outputs.pull_request }}
+      run_attempt: ${{ steps.target.outputs.run_attempt }}
+      run_id: ${{ steps.target.outputs.run_id }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate successful test-bot run
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ACTOR_ID: ${{ github.event.workflow_run.actor.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.head_repository.id }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_PATH: ${{ github.event.workflow_run.path }}
+          RUN_REPOSITORY_ID: ${{ github.event.workflow_run.repository.id }}
+          RUN_STATUS: ${{ github.event.workflow_run.status }}
+          RUN_TRIGGERING_ACTOR_ID: ${{ github.event.workflow_run.triggering_actor.id }}
+          RUN_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+        run: |
+          set -euo pipefail
+
+          repository_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          repository_id="$(jq -r '.id' <<<"$repository_json")"
+          owner_id="$(jq -r '.owner.id' <<<"$repository_json")"
+          workflow_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml" \
+            --jq '.id')"
+
+          test "$RUN_STATUS" = completed
+          test "$RUN_CONCLUSION" = success
+          test "$RUN_EVENT" = pull_request
+          test "$RUN_PATH" = .github/workflows/tests.yml
+          test "$RUN_WORKFLOW_ID" = "$workflow_id"
+          test "$RUN_REPOSITORY_ID" = "$repository_id"
+          test "$RUN_HEAD_REPOSITORY_ID" = "$repository_id"
+          test "$RUN_ACTOR_ID" = "$owner_id"
+          test "$RUN_TRIGGERING_ACTOR_ID" = "$owner_id"
+          [[ "$RUN_HEAD_BRANCH" =~ ^automation/kwwk-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          runs_json="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs" \
+            -f head_sha="$RUN_HEAD_SHA" \
+            -f event=pull_request \
+            -f per_page=100)"
+          latest_run="$(jq -c \
+            '.workflow_runs | sort_by(.run_number, .run_attempt) | last' \
+            <<<"$runs_json")"
+          test "$latest_run" != null
+          test "$(jq -r '.id' <<<"$latest_run")" = "$RUN_ID"
+          test "$(jq -r '.run_attempt' <<<"$latest_run")" = "$RUN_ATTEMPT"
+          test "$(jq -r '.status' <<<"$latest_run")" = completed
+          test "$(jq -r '.conclusion' <<<"$latest_run")" = success
+          test "$(jq -r '.head_sha' <<<"$latest_run")" = "$RUN_HEAD_SHA"
+          test "$(jq -r '.head_repository.id' <<<"$latest_run")" = "$repository_id"
+
+          # workflow_run.pull_requests is allowed to be empty. Resolve the
+          # still-open PR from the trusted same-repository head branch, then
+          # bind it back to the exact tested commit below.
+          candidate_pulls="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f head="${GITHUB_REPOSITORY_OWNER}:${RUN_HEAD_BRANCH}" \
+            -f base=main \
+            -f per_page=100)"
+          matching_pulls="$(jq -c \
+            --arg branch "$RUN_HEAD_BRANCH" \
+            --arg sha "$RUN_HEAD_SHA" \
+            --argjson owner_id "$owner_id" \
+            --argjson repository_id "$repository_id" \
+            '[.[] | select(
+              .state == "open" and
+              (.draft | not) and
+              .base.ref == "main" and
+              .base.repo.id == $repository_id and
+              .head.ref == $branch and
+              .head.sha == $sha and
+              .head.repo.id == $repository_id and
+              .user.id == $owner_id
+            )]' <<<"$candidate_pulls")"
+          jq -e 'length == 1' <<<"$matching_pulls" >/dev/null
+          pull_request="$(jq -r '.[0].number' <<<"$matching_pulls")"
+
+          pull_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
+          jq -e \
+            --arg branch "$RUN_HEAD_BRANCH" \
+            --arg sha "$RUN_HEAD_SHA" \
+            --argjson owner_id "$owner_id" \
+            --argjson repository_id "$repository_id" \
+            '.state == "open" and
+             (.draft | not) and
+             .base.ref == "main" and
+             .base.repo.id == $repository_id and
+             .head.ref == $branch and
+             .head.sha == $sha and
+             .head.repo.id == $repository_id and
+             .user.id == $owner_id and
+             .changed_files == 1 and
+             .commits == 1' <<<"$pull_json" >/dev/null
+
+          files_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}/files?per_page=100")"
+          jq -e \
+            'length == 1 and .[0].filename == "Formula/kwwk.rb"' \
+            <<<"$files_json" >/dev/null
+
+          commit_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${RUN_HEAD_SHA}")"
+          jq -e '.parents | length == 1' <<<"$commit_json" >/dev/null
+
+          artifacts_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+          jq -e \
+            --arg branch "$RUN_HEAD_BRANCH" \
+            --arg sha "$RUN_HEAD_SHA" \
+            --argjson repository_id "$repository_id" \
+            --argjson run_id "$RUN_ID" \
+            '([.artifacts[] | select(.name | startswith("bottles"))]) as $bottles |
+             ($bottles | length) == 2 and
+             ([$bottles[].name] | sort) ==
+               ["bottles_macos-15", "bottles_macos-15-intel"] and
+             all($bottles[];
+               (.expired | not) and
+               .size_in_bytes > 0 and
+               .workflow_run.id == $run_id and
+               .workflow_run.repository_id == $repository_id and
+               .workflow_run.head_repository_id == $repository_id and
+               .workflow_run.head_branch == $branch and
+               .workflow_run.head_sha == $sha
+             )' <<<"$artifacts_json" >/dev/null
+
+          {
+            echo "pull_request=${pull_request}"
+            echo "head_sha=${RUN_HEAD_SHA}"
+            echo "run_attempt=${RUN_ATTEMPT}"
+            echo "run_id=${RUN_ID}"
+          } >>"$GITHUB_OUTPUT"
+
+  dispatch:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch bottle publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          PULL_REQUEST: ${{ needs.validate.outputs.pull_request }}
+          RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+        run: |
+          gh workflow run publish.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f pull_request="$PULL_REQUEST" \
+            -f head_sha="$HEAD_SHA" \
+            -f test_run_id="$RUN_ID" \
+            -f test_run_attempt="$RUN_ATTEMPT"
