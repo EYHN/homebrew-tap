@@ -9,6 +9,19 @@ on:
       head_sha:
         description: Exact pull request head commit SHA
         required: true
+      test_run_id:
+        description: Exact successful test-bot run ID (automatic publishing)
+        required: false
+      test_run_attempt:
+        description: Exact successful test-bot run attempt (automatic publishing)
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: brew-pr-pull
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   pr-pull:
@@ -20,6 +33,185 @@ jobs:
       issues: read
       pull-requests: write
     steps:
+      - name: Verify publication target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+          TEST_RUN_ATTEMPT: ${{ inputs.test_run_attempt }}
+          TEST_RUN_ID: ${{ inputs.test_run_id }}
+        run: |
+          set -euo pipefail
+
+          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ -n "$TEST_RUN_ID" || -n "$TEST_RUN_ATTEMPT" ]]; then
+            [[ "$TEST_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$TEST_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+            automatic=true
+          else
+            automatic=false
+          fi
+
+          repository_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          repository_id="$(jq -r '.id' <<<"$repository_json")"
+          owner_id="$(jq -r '.owner.id' <<<"$repository_json")"
+          workflow_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml" \
+            --jq '.id')"
+
+          pull_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}")"
+          head_branch="$(jq -r '.head.ref' <<<"$pull_json")"
+          jq -e \
+            --arg branch "$head_branch" \
+            --arg sha "$HEAD_SHA" \
+            --argjson owner_id "$owner_id" \
+            --argjson repository_id "$repository_id" \
+            '.state == "open" and
+             (.draft | not) and
+             .base.ref == "main" and
+             .base.repo.id == $repository_id and
+             .head.ref == $branch and
+             .head.sha == $sha and
+             .head.repo.id == $repository_id and
+             .user.id == $owner_id and
+             .changed_files == 1 and
+             .commits == 1' <<<"$pull_json" >/dev/null
+          [[ "$head_branch" =~ ^automation/kwwk-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+          files_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}/files?per_page=100")"
+          jq -e \
+            'length == 1 and .[0].filename == "Formula/kwwk.rb"' \
+            <<<"$files_json" >/dev/null
+
+          commit_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${HEAD_SHA}")"
+          jq -e '.parents | length == 1' <<<"$commit_json" >/dev/null
+
+          runs_json="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/tests.yml/runs" \
+            -f head_sha="$HEAD_SHA" \
+            -f event=pull_request \
+            -f per_page=100)"
+          tested_run="$(jq -c \
+            '.workflow_runs | sort_by(.run_number, .run_attempt) | last' \
+            <<<"$runs_json")"
+          test "$tested_run" != null
+          run_id="$(jq -r '.id' <<<"$tested_run")"
+          run_attempt="$(jq -r '.run_attempt' <<<"$tested_run")"
+          test "$(jq -r '.workflow_id' <<<"$tested_run")" = "$workflow_id"
+          test "$(jq -r '.path' <<<"$tested_run")" = .github/workflows/tests.yml
+          test "$(jq -r '.event' <<<"$tested_run")" = pull_request
+          test "$(jq -r '.status' <<<"$tested_run")" = completed
+          test "$(jq -r '.conclusion' <<<"$tested_run")" = success
+          test "$(jq -r '.head_branch' <<<"$tested_run")" = "$head_branch"
+          test "$(jq -r '.head_sha' <<<"$tested_run")" = "$HEAD_SHA"
+          test "$(jq -r '.repository.id' <<<"$tested_run")" = "$repository_id"
+          test "$(jq -r '.head_repository.id' <<<"$tested_run")" = "$repository_id"
+          test "$(jq -r '.actor.id' <<<"$tested_run")" = "$owner_id"
+          test "$(jq -r '.triggering_actor.id' <<<"$tested_run")" = "$owner_id"
+          if [[ "$automatic" = true ]]; then
+            test "$run_id" = "$TEST_RUN_ID"
+            test "$run_attempt" = "$TEST_RUN_ATTEMPT"
+          fi
+
+          artifacts_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"
+          jq -e \
+            --arg branch "$head_branch" \
+            --arg sha "$HEAD_SHA" \
+            --argjson repository_id "$repository_id" \
+            --argjson run_id "$run_id" \
+            '([.artifacts[] | select(.name | startswith("bottles"))]) as $bottles |
+             ($bottles | length) == 2 and
+             ([$bottles[].name] | sort) ==
+               ["bottles_macos-15", "bottles_macos-15-intel"] and
+             all($bottles[];
+               (.expired | not) and
+               .size_in_bytes > 0 and
+               .workflow_run.id == $run_id and
+               .workflow_run.repository_id == $repository_id and
+               .workflow_run.head_repository_id == $repository_id and
+               .workflow_run.head_branch == $branch and
+               .workflow_run.head_sha == $sha
+             )' <<<"$artifacts_json" >/dev/null
+
+          main_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')"
+          main_formula="$RUNNER_TEMP/kwwk-main.rb"
+          head_formula="$RUNNER_TEMP/kwwk-head.rb"
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/${GITHUB_REPOSITORY}/contents/Formula/kwwk.rb?ref=${main_sha}" \
+            >"$main_formula"
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/${GITHUB_REPOSITORY}/contents/Formula/kwwk.rb?ref=${HEAD_SHA}" \
+            >"$head_formula"
+
+          AUTOMATIC="$automatic" HEAD_BRANCH="$head_branch" ruby \
+            - "$main_formula" "$head_formula" <<'RUBY'
+          require "rubygems"
+
+          URL_PATTERN = /^  url "([^"]+)"$/
+          SHA_PATTERN = /^  sha256 "([^"]+)"$/
+          BOTTLE_PATTERN = /\n  bottle do\n.*?^  end\n/m
+          SOURCE_URL_PATTERN = %r{\Ahttps://github\.com/EYHN/kwwk/archive/refs/tags/(v\d+\.\d+\.\d+)\.tar\.gz\z}
+
+          def source_fields(formula, path)
+            urls = formula.scan(URL_PATTERN).flatten
+            shas = formula.scan(SHA_PATTERN).flatten
+            abort "expected exactly one top-level source url in #{path}" unless urls.one?
+            abort "expected exactly one top-level source sha256 in #{path}" unless shas.one?
+            abort "invalid source sha256 in #{path}" unless shas.first.match?(/\A[0-9a-f]{64}\z/)
+
+            tag = urls.first.match(SOURCE_URL_PATTERN)&.[](1)
+            abort "unexpected source URL in #{path}" unless tag
+            [urls.first, shas.first, tag, Gem::Version.new(tag.delete_prefix("v"))]
+          rescue ArgumentError => error
+            abort "cannot parse formula version in #{path}: #{error.message}"
+          end
+
+          main_path = ARGV.fetch(0)
+          head_path = ARGV.fetch(1)
+          main_formula = File.read(main_path)
+          head_formula = File.read(head_path)
+          main_url, _main_sha, current_tag, current_version = source_fields(main_formula, main_path)
+          head_url, head_sha, target_tag, target_version = source_fields(head_formula, head_path)
+
+          expected_branch = "automation/kwwk-#{target_tag}"
+          abort "branch does not match formula tag" unless ENV.fetch("HEAD_BRANCH") == expected_branch
+          abort "head formula must not contain a bottle block" if head_formula.match?(BOTTLE_PATTERN)
+
+          expected_formula = main_formula.dup
+          expected_formula.sub!(URL_PATTERN, %(  url "#{head_url}"))
+          expected_formula.sub!(SHA_PATTERN, %(  sha256 "#{head_sha}"))
+          bottle_blocks = expected_formula.scan(BOTTLE_PATTERN)
+          abort "expected at most one bottle block" if bottle_blocks.length > 1
+          expected_formula.sub!(BOTTLE_PATTERN, "") if bottle_blocks.one?
+          abort "pull request contains changes outside the source bump" unless expected_formula == head_formula
+
+          if ENV.fetch("AUTOMATIC") == "true"
+            abort "refusing non-increasing automatic bump #{current_tag} -> #{target_tag}" unless target_version > current_version
+          elsif target_version < current_version
+            abort "refusing to downgrade kwwk from #{current_tag} to #{target_tag}"
+          end
+
+          puts "version guard: #{current_tag} -> #{target_tag}"
+          puts "source guard: #{main_url} -> #{head_url}"
+          RUBY
+
+          {
+            echo "head_branch=${head_branch}"
+            echo "main_sha=${main_sha}"
+            echo "run_attempt=${run_attempt}"
+            echo "run_id=${run_id}"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
         with:
@@ -28,45 +220,37 @@ jobs:
       - name: Set up git
         uses: Homebrew/actions/git-user-config@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
 
-      - name: Verify pull request version and head
+      - name: Revalidate immutable publication inputs
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ steps.target.outputs.head_branch }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          MAIN_SHA: ${{ steps.target.outputs.main_sha }}
           PULL_REQUEST: ${{ inputs.pull_request }}
+          RUN_ATTEMPT: ${{ steps.target.outputs.run_attempt }}
+          RUN_ID: ${{ steps.target.outputs.run_id }}
         run: |
-          actual_head="$(gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
-          base_ref="$(gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
-          test "$base_ref" = main || { echo "refusing non-main pull request" >&2; exit 1; }
-          test "$actual_head" = "$HEAD_SHA" || { echo "pull request head changed" >&2; exit 1; }
+          set -euo pipefail
 
-          main_formula="$RUNNER_TEMP/kwwk-main.rb"
-          head_formula="$RUNNER_TEMP/kwwk-head.rb"
-          gh api "repos/$GITHUB_REPOSITORY/contents/Formula/kwwk.rb?ref=main" --jq .content \
-            | base64 --decode > "$main_formula"
-          gh api "repos/$GITHUB_REPOSITORY/contents/Formula/kwwk.rb?ref=$HEAD_SHA" --jq .content \
-            | base64 --decode > "$head_formula"
+          pull_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}")"
+          test "$(jq -r '.state' <<<"$pull_json")" = open
+          test "$(jq -r '.base.ref' <<<"$pull_json")" = main
+          test "$(jq -r '.head.ref' <<<"$pull_json")" = "$HEAD_BRANCH"
+          test "$(jq -r '.head.sha' <<<"$pull_json")" = "$HEAD_SHA"
 
-          ruby - "$main_formula" "$head_formula" <<'RUBY'
-          require "rubygems"
+          current_main="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')"
+          test "$current_main" = "$MAIN_SHA"
 
-          def formula_version(path)
-            formula = File.read(path)
-            urls = formula.scan(/^  url "([^"]+)"$/).flatten
-            abort "expected exactly one top-level source url in #{path}" unless urls.one?
-            tag = urls.first.match(%r{/archive/refs/tags/([^/]+)\.tar\.gz$})&.[](1)
-            abort "cannot determine formula tag in #{path}" unless tag
-            [tag, Gem::Version.new(tag.delete_prefix("v"))]
-          rescue ArgumentError => error
-            abort "cannot parse formula version in #{path}: #{error.message}"
-          end
-
-          current_tag, current_version = formula_version(ARGV.fetch(0))
-          target_tag, target_version = formula_version(ARGV.fetch(1))
-          if target_version < current_version
-            abort "refusing to downgrade kwwk from #{current_tag} to #{target_tag}"
-          end
-          puts "version guard: #{current_tag} -> #{target_tag}"
-          RUBY
+          run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r '.run_attempt' <<<"$run_json")" = "$RUN_ATTEMPT"
+          test "$(jq -r '.status' <<<"$run_json")" = completed
+          test "$(jq -r '.conclusion' <<<"$run_json")" = success
+          test "$(jq -r '.head_branch' <<<"$run_json")" = "$HEAD_BRANCH"
+          test "$(jq -r '.head_sha' <<<"$run_json")" = "$HEAD_SHA"
 
       - name: Pull bottles
         env:

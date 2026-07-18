@@ -1,0 +1,6 @@
+paths:
+  '**/.github/workflows/publish.yml':
+    ignore:
+      # GitHub supports concurrency.queue, but actionlint 1.7.12 does not yet
+      # include it in the workflow schema used by Homebrew's style check.
+      - 'unexpected key "queue" for "concurrency" section'
