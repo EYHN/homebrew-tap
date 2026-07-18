@@ -21,7 +21,6 @@ permissions: {}
 concurrency:
   group: brew-pr-pull
   cancel-in-progress: false
-  queue: max
 
 jobs:
   pr-pull:
