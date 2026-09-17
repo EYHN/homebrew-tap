@@ -1,8 +1,8 @@
 class Kwwk < Formula
   desc "Swift-native coding-agent CLI (Anthropic, Codex, Gemini, Copilot)"
   homepage "https://github.com/EYHN/kwwk"
-  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.60.tar.gz"
-  sha256 "dcf0e51579fc4ca73590d443afc9e448bfd3f230c440eb5a6c4631c7f5255cd7"
+  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.61.tar.gz"
+  sha256 "816ea0f5943abe205ffb4fb0eae7c3fa9a2e76bba4014a6c825a9dd8ca71cfb6"
   license "MIT"
   head "https://github.com/EYHN/kwwk.git", branch: "main"
 
