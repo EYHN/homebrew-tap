@@ -6,6 +6,12 @@ class Kwwk < Formula
   license "MIT"
   head "https://github.com/EYHN/kwwk.git", branch: "main"
 
+  bottle do
+    root_url "https://github.com/EYHN/homebrew-tap/releases/download/kwwk-0.1.96"
+    sha256 cellar: :any_skip_relocation, arm64_sequoia: "bdf0c37520d3511928f6870bcd4629729dc60c080b3d05ece0031aac12902b70"
+    sha256 cellar: :any_skip_relocation, sequoia:       "26b6ae08f0798372b29fb43a1ddf1a2c8e9b2ce368f84bbca9ed47182baf1324"
+  end
+
   depends_on xcode: ["16.0", :build]
   depends_on macos: :sonoma
 
