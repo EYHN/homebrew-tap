@@ -1,16 +1,10 @@
 class Kwwk < Formula
   desc "Swift-native coding-agent CLI (Anthropic, Codex, Gemini, Copilot)"
   homepage "https://github.com/EYHN/kwwk"
-  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.117.tar.gz"
-  sha256 "4f3f9b6c70105072bd2905bfa2126a864e58847136a11f62e2cf78bae18c90fc"
+  url "https://github.com/EYHN/kwwk/archive/refs/tags/v0.1.118.tar.gz"
+  sha256 "7e14749a2d34069a9bb75ffa30a23c86d542dfca229fab2e1646cd4bc4b61198"
   license "MIT"
   head "https://github.com/EYHN/kwwk.git", branch: "main"
-
-  bottle do
-    root_url "https://github.com/EYHN/homebrew-tap/releases/download/kwwk-0.1.117"
-    sha256 cellar: :any_skip_relocation, arm64_sequoia: "2595b56096d5ccf4eb00a8bd2bb0db97968ae4276bb9fa7a3bd5eb1b4b2ff802"
-    sha256 cellar: :any_skip_relocation, sequoia:       "0f4a571cd40a54078e48e8f9f1e31e4445ff337cb36a98fc511fd754b4266efe"
-  end
 
   depends_on xcode: ["16.0", :build]
   depends_on macos: :sonoma
